@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"os"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -26,6 +28,10 @@ type PV struct {
 
 var keys []PV
 var keyFile = "keys.json"
+var allCount int64
+var failCount int64
+var succCount int64
+var pageSize int
 
 func load() {
 	b, err := os.ReadFile(keyFile)
@@ -62,7 +68,8 @@ func createPrivkeys() {
 	}
 }
 
-func SendTx(client *ethclient.Client, from string, toAddress common.Address, value *big.Int) {
+func SendTx(index, i int, client *ethclient.Client, from string, toAddress common.Address, value *big.Int) {
+	atomic.AddInt64(&allCount, 1)
 	privateKey, err := crypto.HexToECDSA(from)
 	if err != nil {
 		log.Fatal(err)
@@ -99,17 +106,43 @@ func SendTx(client *ethclient.Client, from string, toAddress common.Address, val
 
 	err = client.SendTransaction(context.Background(), signedTx)
 	if err != nil {
-		fmt.Printf("tx sent error: %s %v", signedTx.Hash().Hex(), err)
+		// failCount++
+		atomic.AddInt64(&failCount, 1)
+		fmt.Printf("\nminer:%d, index:%d, tx sent error: %s %v\n", index, i, signedTx.Hash().Hex(), err)
+		return
 	}
+	atomic.AddInt64(&succCount, 1)
+	// fmt.Printf("\n miner:%d, index:%d, tx sent: %s \n", index, i, signedTx.Hash().Hex())
+}
 
-	fmt.Printf("\ntx sent: %s\n", signedTx.Hash().Hex())
+var rpcClients = []*ethclient.Client{}
+
+func InitRPC() {
+	for i := 0; i < 4; i++ {
+		if i == 0 {
+			c, _ := ethclient.Dial(os.Getenv("RPC"))
+			rpcClients = append(rpcClients, c)
+			continue
+		}
+		if os.Getenv(fmt.Sprintf("RPC%d", i)) != "" {
+			c, _ := ethclient.Dial(os.Getenv(fmt.Sprintf("RPC%d", i)))
+			rpcClients = append(rpcClients, c)
+		}
+	}
 }
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("Recovered in f", r)
+		}
+	}()
 	err := godotenv.Load(".env")
 	if err != nil {
 		log.Fatalf("Some error occured. Err: %s", err)
 	}
+	InitRPC()
+	pageSize, _ = strconv.Atoi(os.Getenv("pageSize"))
 	client, err := ethclient.Dial(os.Getenv("RPC"))
 	if err != nil {
 		log.Fatal(err)
@@ -123,28 +156,69 @@ func main() {
 		}
 	}
 	load()
-	maxStr := os.Getenv("MAX")
-	max, _ := strconv.ParseInt(maxStr, 10, 64)
-	for {
-		count := 0
+	fmt.Printf("\nSend %d txs every miner / s, miner count:%d\n", pageSize, len(rpcClients))
+
+	if os.Getenv("init") == "1" {
 		for i, v := range keys {
 			ba, _ := client.BalanceAt(context.Background(), common.HexToAddress(v.A), nil)
-			if ba.Cmp(big.NewInt(1e7)) <= 0 {
-				SendTx(client, os.Getenv("PRIVATE_KEY"), common.HexToAddress(v.A), big.NewInt(2e18))
-				count++
+			if ba.Cmp(big.NewInt(1e15)) <= 0 {
+				fmt.Println("--------------------------------------------------------------------------init account index", i)
+				SendTx(0, i, client, os.Getenv("PRIVATE_KEY"), common.HexToAddress(v.A), big.NewInt(2e18))
 				continue
-			}
-			var to common.Address
-			if i == len(keys)-1 {
-				to = common.HexToAddress(keys[0].A)
-			} else {
-				to = common.HexToAddress(keys[i+1].A)
-			}
-			go SendTx(client, v.K, to, big.NewInt(1e1))
-			count++
-			if count >= int(max) {
-				time.Sleep(10 * time.Second)
 			}
 		}
 	}
+
+	ctx := context.Background()
+	wg := sync.WaitGroup{}
+	for i := 0; i < len(rpcClients); i++ {
+		index := i % len(rpcClients)
+		wg.Add(1)
+		go AccountSend(&wg, ctx, index)
+	}
+	go SendStats(&wg, ctx)
+	wg.Wait()
+}
+
+// AccountSend(ctx context.Context, index int)
+func AccountSend(wg *sync.WaitGroup, ctx context.Context, index int) {
+	defer wg.Done()
+	fmt.Printf("\n-----------------------------------------------------------------miner:%d\n", index)
+	rpcClient := rpcClients[index]
+	var to common.Address
+	if index == len(keys)-1 {
+		to = common.HexToAddress(keys[0].A)
+	} else {
+		to = common.HexToAddress(keys[index+1].A)
+	}
+	offset := pageSize * index
+	for {
+		for i := offset; i < pageSize*(index+1); i++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				v := keys[i]
+				// fmt.Println(v.A, to)
+				go SendTx(index, i, rpcClient, v.K, to, big.NewInt(1e1))
+				time.Sleep(time.Second / time.Duration(pageSize))
+			}
+		}
+		log.Println("----------------------------------------------------------------------miner", index, "send txCount", pageSize)
+	}
+	//
+}
+func SendStats(wg *sync.WaitGroup, ctx context.Context) {
+	defer wg.Done()
+	t := time.NewTicker(time.Second * 10)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			log.Println("----------------------------------------------------------------------allCount", allCount, "successCount", succCount, "failCount", failCount)
+		}
+	}
+	//
 }

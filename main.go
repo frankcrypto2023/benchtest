@@ -156,7 +156,7 @@ func main() {
 		}
 	}
 	load()
-	fmt.Printf("\nSend %d txs every miner / s, miner count:%d\n", pageSize, len(rpcClients))
+	fmt.Printf("\nSend %d txs every miner / sencond, miner count:%d\n", pageSize, len(rpcClients))
 
 	if os.Getenv("init") == "1" {
 		for i, v := range keys {
@@ -183,15 +183,11 @@ func main() {
 // AccountSend(ctx context.Context, index int)
 func AccountSend(wg *sync.WaitGroup, ctx context.Context, index int) {
 	defer wg.Done()
-	fmt.Printf("\n-----------------------------------------------------------------miner:%d\n", index)
 	rpcClient := rpcClients[index]
 	var to common.Address
-	if index == len(keys)-1 {
-		to = common.HexToAddress(keys[0].A)
-	} else {
-		to = common.HexToAddress(keys[index+1].A)
-	}
 	offset := pageSize * index
+	fmt.Printf("\n-----------------------------------------------------------------miner:%d account start:%d account end:%d\n",
+		index, offset, pageSize*(index+1))
 	for {
 		for i := offset; i < pageSize*(index+1); i++ {
 			select {
@@ -199,9 +195,14 @@ func AccountSend(wg *sync.WaitGroup, ctx context.Context, index int) {
 				return
 			default:
 				v := keys[i]
+				if i == len(keys)-1 {
+					to = common.HexToAddress(keys[0].A)
+				} else {
+					to = common.HexToAddress(keys[i+1].A)
+				}
 				// fmt.Println(v.A, to)
 				go SendTx(index, i, rpcClient, v.K, to, big.NewInt(1e1))
-				time.Sleep(time.Second / time.Duration(pageSize))
+				<-time.After(time.Second / time.Duration(pageSize))
 			}
 		}
 		log.Println("----------------------------------------------------------------------miner", index, "send txCount", pageSize)

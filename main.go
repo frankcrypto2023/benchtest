@@ -24,14 +24,37 @@ import (
 type PV struct {
 	K string `json:"k"`
 	A string `json:"a"`
+	sync.Mutex
 }
 
 var keys []PV
 var keyFile = "keys.json"
-var allCount int64
-var failCount int64
-var succCount int64
+
+type statsSend struct {
+	start     time.Time
+	allCount  int64
+	failCount int64
+	succCount int64
+	sync.RWMutex
+}
+
+func (self *statsSend) Tps() string {
+	return fmt.Sprintf("%d/s", self.succCount/(int64(time.Since(self.start).Seconds())))
+}
+
+func (self *statsSend) Spent() string {
+	return time.Since(self.start).String()
+}
+
+var ss statsSend
 var pageSize int
+
+type CountStats struct {
+	AllCount  int64
+	SuccCount int64
+	FailCount int64
+	sync.Mutex
+}
 
 func load() {
 	b, err := os.ReadFile(keyFile)
@@ -68,9 +91,31 @@ func createPrivkeys() {
 	}
 }
 
-func SendTx(index, i int, client *ethclient.Client, from string, toAddress common.Address, value *big.Int) {
-	atomic.AddInt64(&allCount, 1)
-	privateKey, err := crypto.HexToECDSA(from)
+func (this *PV) WaitTx(ctx context.Context, txid string, client *ethclient.Client) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			_, err := client.TransactionReceipt(ctx, common.HexToHash(txid))
+			if err == nil { // block packed
+				return
+			}
+		}
+	}
+}
+
+func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Client,
+	toAddress common.Address, value *big.Int, repeatTimes int64, wg *sync.WaitGroup, cs *CountStats) {
+	if wg != nil {
+		defer wg.Done()
+	}
+	this.Lock()
+	defer this.Unlock()
+
+	privateKey, err := crypto.HexToECDSA(this.K)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -81,20 +126,21 @@ func SendTx(index, i int, client *ethclient.Client, from string, toAddress commo
 	}
 
 	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
-	nonce, err := client.PendingNonceAt(context.Background(), fromAddress)
+
+	nonce, err := client.PendingNonceAt(ctx, fromAddress)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	gasLimit := uint64(21000) // in units
-	gasPrice, err := client.SuggestGasPrice(context.Background())
+	gasPrice, err := client.SuggestGasPrice(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 	var data []byte
 	tx := types.NewTransaction(nonce, toAddress, value, gasLimit, gasPrice, data)
 
-	chainID, err := client.ChainID(context.Background())
+	chainID, err := client.ChainID(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -103,16 +149,19 @@ func SendTx(index, i int, client *ethclient.Client, from string, toAddress commo
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	err = client.SendTransaction(context.Background(), signedTx)
+	err = client.SendTransaction(ctx, signedTx)
 	if err != nil {
-		// failCount++
-		atomic.AddInt64(&failCount, 1)
-		fmt.Printf("\nminer:%d, index:%d, tx sent error: %s %v\n", index, i, signedTx.Hash().Hex(), err)
+
+		atomic.AddInt64(&cs.FailCount, 1)
+		fmt.Printf("\nminer:%d, index:%d, tx sent error: %s %v repeatTimes:%d\n", index, i, signedTx.Hash().Hex(), err, repeatTimes)
 		return
 	}
-	atomic.AddInt64(&succCount, 1)
+
+	atomic.AddInt64(&cs.SuccCount, 1)
 	// fmt.Printf("\n miner:%d, index:%d, tx sent: %s \n", index, i, signedTx.Hash().Hex())
+	if os.Getenv("waitTx") == "1" {
+		this.WaitTx(ctx, signedTx.Hash().Hex(), client)
+	}
 }
 
 var rpcClients = []*ethclient.Client{}
@@ -156,26 +205,30 @@ func main() {
 		}
 	}
 	load()
-	fmt.Printf("\nSend %d txs every miner / sencond, miner count:%d\n", pageSize, len(rpcClients))
 
+	ctx := context.Background()
+	fmt.Printf("\nSend %d txs every miner / sencond, miner count:%d\n", pageSize, len(rpcClients))
+	adminPV := PV{
+		K: os.Getenv("PRIVATE_KEY"),
+	}
 	if os.Getenv("init") == "1" {
 		for i, v := range keys {
 			ba, _ := client.BalanceAt(context.Background(), common.HexToAddress(v.A), nil)
 			if ba.Cmp(big.NewInt(1e15)) <= 0 {
-				fmt.Println("--------------------------------------------------------------------------init account index", i)
-				SendTx(0, i, client, os.Getenv("PRIVATE_KEY"), common.HexToAddress(v.A), big.NewInt(2e18))
+				fmt.Println("----init account index", i)
+				adminPV.SendTx(ctx, 0, i, client, common.HexToAddress(v.A), big.NewInt(2e18), 0, nil, nil)
 				continue
 			}
 		}
 	}
-
-	ctx := context.Background()
+	ss.start = time.Now()
 	wg := sync.WaitGroup{}
 	for i := 0; i < len(rpcClients); i++ {
 		index := i % len(rpcClients)
 		wg.Add(1)
 		go AccountSend(&wg, ctx, index)
 	}
+	wg.Add(1)
 	go SendStats(&wg, ctx)
 	wg.Wait()
 }
@@ -186,26 +239,44 @@ func AccountSend(wg *sync.WaitGroup, ctx context.Context, index int) {
 	rpcClient := rpcClients[index]
 	var to common.Address
 	offset := pageSize * index
-	fmt.Printf("\n-----------------------------------------------------------------miner:%d account start:%d account end:%d\n",
+	fmt.Printf("\n-------------miner:%d account start:%d account end:%d\n",
 		index, offset, pageSize*(index+1))
+	repeat := int64(0)
+	wg1 := sync.WaitGroup{}
 	for {
+		repeat++
+		cs := &CountStats{
+			SuccCount: 0,
+			FailCount: 0,
+			AllCount:  0,
+		}
 		for i := offset; i < pageSize*(index+1); i++ {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				v := keys[i]
+				// v := keys[i]
 				if i == len(keys)-1 {
 					to = common.HexToAddress(keys[0].A)
 				} else {
 					to = common.HexToAddress(keys[i+1].A)
 				}
 				// fmt.Println(v.A, to)
-				go SendTx(index, i, rpcClient, v.K, to, big.NewInt(1e1))
+				atomic.AddInt64(&cs.AllCount, 1)
+				wg1.Add(1)
+				go keys[i].SendTx(ctx, index, i, rpcClient, to, big.NewInt(1e1), repeat, &wg1, cs)
 				<-time.After(time.Second / time.Duration(pageSize))
 			}
 		}
-		log.Println("----------------------------------------------------------------------miner", index, "send txCount", pageSize)
+		wg1.Wait()
+		log.Println("-------------miner",
+			index, "repeat", repeat, "send txCount", pageSize, "all", cs.AllCount, "Succ", cs.SuccCount, "fail", cs.FailCount)
+		ss.RLock()
+		atomic.AddInt64(&ss.allCount, cs.AllCount)
+		atomic.AddInt64(&ss.succCount, cs.SuccCount)
+		atomic.AddInt64(&ss.failCount, cs.FailCount)
+		ss.RUnlock()
+		// os.Exit(0)
 	}
 	//
 }
@@ -218,7 +289,10 @@ func SendStats(wg *sync.WaitGroup, ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			log.Println("----------------------------------------------------------------------allCount", allCount, "successCount", succCount, "failCount", failCount)
+			ss.RLock()
+			log.Println("-------------AllCount",
+				ss.allCount, "AllSuccessCount", ss.succCount, "AllFailCount", ss.failCount, "Spent", ss.Spent(), "Send TPS", ss.Tps())
+			ss.RUnlock()
 		}
 	}
 	//

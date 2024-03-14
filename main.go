@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -171,18 +172,20 @@ func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Clie
 }
 
 var rpcClients = []*ethclient.Client{}
+var RPCS []string
 
 func InitRPC() {
-	for i := 0; i < 4; i++ {
-		if i == 0 {
-			c, _ := ethclient.Dial(os.Getenv("RPC"))
+	RPCS = strings.Split(os.Getenv("RPC"), ",")
+	for _, v := range RPCS {
+		if v != "" {
+			c, err := ethclient.Dial(v)
+			if err != nil {
+				log.Fatalln(err)
+				return
+			}
 			rpcClients = append(rpcClients, c)
-			continue
 		}
-		if os.Getenv(fmt.Sprintf("RPC%d", i)) != "" {
-			c, _ := ethclient.Dial(os.Getenv(fmt.Sprintf("RPC%d", i)))
-			rpcClients = append(rpcClients, c)
-		}
+
 	}
 }
 
@@ -201,10 +204,7 @@ func main() {
 	}
 	InitRPC()
 	pageSize, _ = strconv.Atoi(os.Getenv("pageSize"))
-	client, err := ethclient.Dial(os.Getenv("RPC"))
-	if err != nil {
-		log.Fatal(err)
-	}
+	client := rpcClients[0]
 	if len(os.Args) > 1 {
 		action := os.Args[1]
 		switch action {

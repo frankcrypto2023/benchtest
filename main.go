@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/joho/godotenv"
+	"github.com/sirupsen/logrus"
 )
 
 type PV struct {
@@ -151,9 +152,14 @@ func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Clie
 	}
 	err = client.SendTransaction(ctx, signedTx)
 	if err != nil {
-
 		atomic.AddInt64(&cs.FailCount, 1)
-		fmt.Printf("\nminer:%d, index:%d, tx sent error: %s %v repeatTimes:%d\n", index, i, signedTx.Hash().Hex(), err, repeatTimes)
+		logrus.WithFields(logrus.Fields{
+			"miner":              index,
+			"send index":         i,
+			"account send times": repeatTimes,
+			"Tx Hash":            signedTx.Hash().Hex(),
+			"Error":              err.Error(),
+		}).Debugf("\nminer:%d, index:%d, tx sent error: %s %v repeatTimes:%d\n", index, i, signedTx.Hash().Hex(), err, repeatTimes)
 		return
 	}
 
@@ -186,6 +192,9 @@ func main() {
 			fmt.Println("Recovered in f", r)
 		}
 	}()
+	logrus.SetFormatter(&logrus.JSONFormatter{})
+	logrus.SetOutput(os.Stdout)
+	logrus.SetLevel(logrus.InfoLevel)
 	err := godotenv.Load(".env")
 	if err != nil {
 		log.Fatalf("Some error occured. Err: %s", err)
@@ -207,7 +216,7 @@ func main() {
 	load()
 
 	ctx := context.Background()
-	fmt.Printf("\nSend %d txs every miner / sencond, miner count:%d\n", pageSize, len(rpcClients))
+	logrus.Infof("\nSend %d txs every miner / sencond, miner count:%d\n", pageSize, len(rpcClients))
 	adminPV := PV{
 		K: os.Getenv("PRIVATE_KEY"),
 	}
@@ -215,7 +224,9 @@ func main() {
 		for i, v := range keys {
 			ba, _ := client.BalanceAt(context.Background(), common.HexToAddress(v.A), nil)
 			if ba.Cmp(big.NewInt(1e15)) <= 0 {
-				fmt.Println("----init account index", i)
+				logrus.WithFields(logrus.Fields{
+					"index": i,
+				}).Info("init account balance")
 				adminPV.SendTx(ctx, 0, i, client, common.HexToAddress(v.A), big.NewInt(2e18), 0, nil, nil)
 				continue
 			}
@@ -239,7 +250,7 @@ func AccountSend(wg *sync.WaitGroup, ctx context.Context, index int) {
 	rpcClient := rpcClients[index]
 	var to common.Address
 	offset := pageSize * index
-	fmt.Printf("\n-------------miner:%d account start:%d account end:%d\n",
+	logrus.Infof("\n-------------miner:%d account start:%d account end:%d\n",
 		index, offset, pageSize*(index+1))
 	repeat := int64(0)
 	wg1 := sync.WaitGroup{}
@@ -269,8 +280,13 @@ func AccountSend(wg *sync.WaitGroup, ctx context.Context, index int) {
 			}
 		}
 		wg1.Wait()
-		log.Println("-------------miner",
-			index, "repeat", repeat, "send txCount", pageSize, "all", cs.AllCount, "Succ", cs.SuccCount, "fail", cs.FailCount)
+		logrus.WithFields(logrus.Fields{
+			"miner":              index,
+			"account send times": repeat,
+			"allSend":            cs.AllCount,
+			"Succ":               cs.SuccCount,
+			"Fail":               cs.FailCount,
+		}).Info("Account Send Stats")
 		ss.RLock()
 		atomic.AddInt64(&ss.allCount, cs.AllCount)
 		atomic.AddInt64(&ss.succCount, cs.SuccCount)
@@ -290,8 +306,13 @@ func SendStats(wg *sync.WaitGroup, ctx context.Context) {
 			return
 		case <-t.C:
 			ss.RLock()
-			log.Println("-------------AllCount",
-				ss.allCount, "AllSuccessCount", ss.succCount, "AllFailCount", ss.failCount, "Spent", ss.Spent(), "Send TPS", ss.Tps())
+			logrus.WithFields(logrus.Fields{
+				"AllSend":  ss.allCount,
+				"Succ":     ss.succCount,
+				"Fail":     ss.failCount,
+				"Spent":    ss.Spent(),
+				"Send TPS": ss.Tps(),
+			}).Info("Bench Send Stats")
 			ss.RUnlock()
 		}
 	}

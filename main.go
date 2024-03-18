@@ -131,13 +131,16 @@ func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Clie
 
 	nonce, err := client.PendingNonceAt(ctx, fromAddress)
 	if err != nil {
-		log.Fatal(err)
+		// log.Fatal(err)
+		logrus.Error(err)
+		return
 	}
 
 	gasLimit := uint64(21000) // in units
 	gasPrice, err := client.SuggestGasPrice(ctx)
 	if err != nil {
-		log.Fatal(err)
+		logrus.Error(err)
+		return
 	}
 	var data []byte
 	tx := types.NewTransaction(nonce, toAddress, value, gasLimit, gasPrice, data)
@@ -153,19 +156,23 @@ func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Clie
 	}
 	err = client.SendTransaction(ctx, signedTx)
 	if err != nil {
-		atomic.AddInt64(&cs.FailCount, 1)
+		if cs != nil {
+			atomic.AddInt64(&cs.FailCount, 1)
+		}
+
 		logrus.WithFields(logrus.Fields{
 			"miner":              index,
 			"send index":         i,
 			"account send times": repeatTimes,
 			"Tx Hash":            signedTx.Hash().Hex(),
 			"Error":              err.Error(),
-		}).Debugf("\nminer:%d, index:%d, tx sent error: %s %v repeatTimes:%d\n", index, i, signedTx.Hash().Hex(), err, repeatTimes)
+		}).Debugf("Send Tx Error")
 		return
 	}
-
-	atomic.AddInt64(&cs.SuccCount, 1)
-	// fmt.Printf("\n miner:%d, index:%d, tx sent: %s \n", index, i, signedTx.Hash().Hex())
+	if cs != nil {
+		atomic.AddInt64(&cs.SuccCount, 1)
+	}
+	logrus.Debugf("miner:%d, index:%d, tx sent: %s", index, i, signedTx.Hash().Hex())
 	if os.Getenv("waitTx") == "1" {
 		this.WaitTx(ctx, signedTx.Hash().Hex(), client)
 	}
@@ -180,8 +187,8 @@ func InitRPC() {
 		if v != "" {
 			c, err := ethclient.Dial(v)
 			if err != nil {
-				log.Fatalln(err)
-				return
+				logrus.Error(err)
+				continue
 			}
 			rpcClients = append(rpcClients, c)
 		}
@@ -197,7 +204,7 @@ func main() {
 	}()
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 	logrus.SetOutput(os.Stdout)
-	logrus.SetLevel(logrus.InfoLevel)
+	logrus.SetLevel(logrus.DebugLevel)
 	err := godotenv.Load(".env")
 	if err != nil {
 		log.Fatalf("Some error occured. Err: %s", err)
@@ -216,19 +223,18 @@ func main() {
 	load()
 
 	ctx := context.Background()
-	logrus.Infof("\nSend %d txs every miner / sencond, miner count:%d\n", pageSize, len(rpcClients))
+	logrus.Infof("Send %d txs every miner / sencond, miner count:%d", pageSize, len(rpcClients))
 	adminPV := PV{
 		K: os.Getenv("PRIVATE_KEY"),
 	}
 	if os.Getenv("init") == "1" {
 		for i, v := range keys {
 			ba, _ := client.BalanceAt(context.Background(), common.HexToAddress(v.A), nil)
-			if ba.Cmp(big.NewInt(1e15)) <= 0 {
+			if ba.Cmp(big.NewInt(2e17)) <= 0 {
 				logrus.WithFields(logrus.Fields{
 					"index": i,
 				}).Info("init account balance")
 				adminPV.SendTx(ctx, 0, i, client, common.HexToAddress(v.A), big.NewInt(2e18), 0, nil, nil)
-				continue
 			}
 		}
 	}

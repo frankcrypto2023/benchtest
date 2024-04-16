@@ -428,7 +428,8 @@ func MempoolSize(wg *sync.WaitGroup, ctx context.Context) {
 					maxPending := uint64(pageSize*len(RPCS)) * 3
 					lbo.CanSend = (pi + qi) < maxPending
 					bos.LBO[i] = lbo
-					logrus.Infof("-------------minertxpool:%d this node pending info %v , canSend :%v, max pending:%v", i, (pi + qi), bos.LBO[i].CanSend, maxPending)
+					logrus.Infof("-------------minertxpool:%d this node pending info %v , pending:%v , queued:%v, canSend :%v, max pending:%v",
+						i, (pi + qi), pi, qi, bos.LBO[i].CanSend, maxPending)
 				}
 			}
 		}

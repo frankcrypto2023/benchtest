@@ -226,6 +226,8 @@ var reorgBlocks int
 
 var start int
 
+var multiple int
+
 func main() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -241,6 +243,7 @@ func main() {
 	}
 	InitRPC()
 	start, _ = strconv.Atoi(os.Getenv("start"))
+	multiple, _ = strconv.Atoi(os.Getenv("multiple"))
 	pageSize, _ = strconv.Atoi(os.Getenv("pageSize"))
 	reorgBlocks, _ = strconv.Atoi(os.Getenv("reorgBlocks"))
 	client := rpcClients[0]
@@ -255,7 +258,7 @@ func main() {
 	load()
 
 	ctx := context.Background()
-	logrus.Infof("Send %d txs every miner / sencond, miner count:%d", pageSize, len(rpcClients))
+	logrus.Infof("Send %d txs every miner / sencond, miner count:%d, txpool multiple:%v", pageSize, len(rpcClients), multiple)
 	adminPV := PV{
 		K: os.Getenv("PRIVATE_KEY"),
 	}
@@ -425,7 +428,7 @@ func MempoolSize(wg *sync.WaitGroup, ctx context.Context) {
 					pi, _ := strconv.ParseUint(bc.Result.Pending[2:], 16, 64)
 					qi, _ := strconv.ParseUint(bc.Result.Queued[2:], 16, 64)
 					lbo := bos.LBO[i]
-					maxPending := uint64(pageSize*len(RPCS)) * 3
+					maxPending := uint64(pageSize * len(RPCS) * multiple)
 					lbo.CanSend = (pi + qi) < maxPending
 					bos.LBO[i] = lbo
 					logrus.Infof("-------------minertxpool:%d this node pending info %v , pending:%v , queued:%v, canSend :%v, max pending:%v",

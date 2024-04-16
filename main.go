@@ -410,7 +410,7 @@ func LatestestBlocks(wg *sync.WaitGroup, ctx context.Context) {
 
 func MempoolSize(wg *sync.WaitGroup, ctx context.Context) {
 	defer wg.Done()
-	t := time.NewTicker(time.Second * 1)
+	t := time.NewTicker(time.Second * 3)
 	defer t.Stop()
 	for {
 		select {
@@ -422,12 +422,13 @@ func MempoolSize(wg *sync.WaitGroup, ctx context.Context) {
 				b := RpcResult(v, "", "txpool_status", []interface{}{}, fmt.Sprintf("%d", i))
 				if b != nil {
 					_ = json.Unmarshal(b, &bc)
-					pi, _ := strconv.ParseUint(bc.Result.Pending, 16, 64)
-					qi, _ := strconv.ParseUint(bc.Result.Queued, 16, 64)
+					pi, _ := strconv.ParseUint(bc.Result.Pending[2:], 16, 64)
+					qi, _ := strconv.ParseUint(bc.Result.Queued[2:], 16, 64)
 					lbo := bos.LBO[i]
-					lbo.CanSend = (pi + qi) < uint64(pageSize*len(RPCS))*3
+					maxPending := uint64(pageSize*len(RPCS)) * 3
+					lbo.CanSend = (pi + qi) < maxPending
 					bos.LBO[i] = lbo
-					logrus.Infof("-------------minertxpool:%d this node pending info %v , canSend :%v, max pending:%v", i, (pi + qi), bos.LBO[i].CanSend, uint64(pageSize*len(RPCS))*2)
+					logrus.Infof("-------------minertxpool:%d this node pending info %v , canSend :%v, max pending:%v", i, (pi + qi), bos.LBO[i].CanSend, maxPending)
 				}
 			}
 		}

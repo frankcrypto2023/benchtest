@@ -297,14 +297,11 @@ func AccountSend(wg *sync.WaitGroup, ctx context.Context, index int) {
 	repeat := int64(0)
 	wg1 := sync.WaitGroup{}
 	for {
-		bos.Lock()
 		if !bos.LBO[index].CanSend {
-			bos.Unlock()
 			logrus.Infof("-------------node:%d need handle current txpool", index)
 			<-time.After(2 * time.Second)
 			continue
 		}
-		bos.Unlock()
 		repeat++
 		cs := &CountStats{
 			SuccCount: 0,
@@ -420,7 +417,6 @@ func MempoolSize(wg *sync.WaitGroup, ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			bos.Lock()
 			for i, v := range RPCS {
 				var bc PendingCount
 				b := RpcResult(v, "", "txpool_status", []interface{}{}, fmt.Sprintf("%d", i))
@@ -434,8 +430,6 @@ func MempoolSize(wg *sync.WaitGroup, ctx context.Context) {
 					logrus.Infof("-------------minertxpool:%d this node pending info %v , canSend :%v, max pending:%v", i, (pi + qi), bos.LBO[i].CanSend, uint64(pageSize*len(RPCS))*2)
 				}
 			}
-			bos.Unlock()
-
 		}
 	}
 	//

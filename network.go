@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -38,7 +39,7 @@ func newHTTPClient() (*http.Client, error) {
 	return &client, nil
 }
 
-func RpcResult(url, method string, params []interface{}, id string) []byte {
+func RpcResult(url, authstr, method string, params []interface{}, id string) []byte {
 
 	paramStr, err := json.Marshal(params)
 	if err != nil {
@@ -54,6 +55,13 @@ func RpcResult(url, method string, params []interface{}, id string) []byte {
 	httpRequest.Close = true
 	httpRequest.Header.Set("Content-Type", "application/json")
 	// Configure basic access authorization.
+	// 使用 Base64 编码用户名和密码
+	if authstr != "" {
+		auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(authstr))
+
+		// 将授权信息添加到请求头中
+		httpRequest.Header.Add("Authorization", auth)
+	}
 
 	// Create the new HTTP client that is configured according to the user-
 	// specified options and submit the request.

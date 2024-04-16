@@ -29,6 +29,19 @@ type PV struct {
 	sync.Mutex
 }
 
+type Node struct {
+	CanSend bool
+	Height  int
+}
+
+type BO map[int]Node
+type BOS struct {
+	LBO BO
+	Max int64
+	sync.Mutex
+}
+
+var bos BOS
 var keys []PV
 var keyFile = "keys.json"
 
@@ -180,8 +193,21 @@ func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Clie
 
 var rpcClients = []*ethclient.Client{}
 var RPCS []string
+var JRPCS []string
+var JAUTH []string
 
 func InitRPC() {
+	JAUTH = strings.Split(os.Getenv("JAUTH"), ",")
+	JRPCS = strings.Split(os.Getenv("JRPC"), ",")
+	bos = BOS{
+		LBO: BO{},
+	}
+	for i, _ := range JRPCS {
+		lbo := bos.LBO[i]
+		lbo.Height = 0
+		bos.LBO[i] = lbo
+	}
+	bos.Max = 0
 	RPCS = strings.Split(os.Getenv("RPC"), ",")
 	for _, v := range RPCS {
 		if v != "" {
@@ -195,6 +221,10 @@ func InitRPC() {
 
 	}
 }
+
+var reorgBlocks int
+
+var start int
 
 func main() {
 	defer func() {
@@ -210,7 +240,9 @@ func main() {
 		log.Fatalf("Some error occured. Err: %s", err)
 	}
 	InitRPC()
+	start, _ = strconv.Atoi(os.Getenv("start"))
 	pageSize, _ = strconv.Atoi(os.Getenv("pageSize"))
+	reorgBlocks, _ = strconv.Atoi(os.Getenv("reorgBlocks"))
 	client := rpcClients[0]
 	if len(os.Args) > 1 {
 		action := os.Args[1]
@@ -241,33 +273,45 @@ func main() {
 	ss.start = time.Now()
 	wg := sync.WaitGroup{}
 	for i := 0; i < len(rpcClients); i++ {
-		index := i % len(rpcClients)
 		wg.Add(1)
-		go AccountSend(&wg, ctx, index)
+		go AccountSend(&wg, ctx, i)
 	}
 	wg.Add(1)
 	go SendStats(&wg, ctx)
+
+	wg.Add(1)
+	go MempoolSize(&wg, ctx)
 	wg.Wait()
 }
 
 // AccountSend(ctx context.Context, index int)
 func AccountSend(wg *sync.WaitGroup, ctx context.Context, index int) {
 	defer wg.Done()
+
 	rpcClient := rpcClients[index]
 	var to common.Address
-	offset := pageSize * index
-	logrus.Infof("\n-------------miner:%d account start:%d account end:%d\n",
-		index, offset, pageSize*(index+1))
+	gap := len(keys) / len(RPCS)
+	offset := index*gap + start
+	logrus.Infof("accountsend-------------miner:%d account start:%d account end:%d",
+		index, offset, offset+pageSize)
 	repeat := int64(0)
 	wg1 := sync.WaitGroup{}
 	for {
+		bos.Lock()
+		if !bos.LBO[index].CanSend {
+			bos.Unlock()
+			logrus.Infof("-------------node:%d need handle current txpool", index)
+			<-time.After(2 * time.Second)
+			continue
+		}
+		bos.Unlock()
 		repeat++
 		cs := &CountStats{
 			SuccCount: 0,
 			FailCount: 0,
 			AllCount:  0,
 		}
-		for i := offset; i < pageSize*(index+1); i++ {
+		for i := offset; i < (offset + pageSize); i++ {
 			select {
 			case <-ctx.Done():
 				return
@@ -320,6 +364,78 @@ func SendStats(wg *sync.WaitGroup, ctx context.Context) {
 				"Send TPS": ss.Tps(),
 			}).Info("Bench Send Stats")
 			ss.RUnlock()
+		}
+	}
+	//
+}
+
+type Txpool struct {
+	Pending string `json:"pending"`
+	Queued  string `json:"queued"`
+}
+
+type PendingCount struct {
+	Result Txpool `json:"result"`
+}
+type BlockCount struct {
+	Result int64 `json:"result"`
+}
+
+func LatestestBlocks(wg *sync.WaitGroup, ctx context.Context) {
+	defer wg.Done()
+	t := time.NewTicker(time.Second * 3)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			bos.Lock()
+			for i, v := range JRPCS {
+				var bc BlockCount
+				b := RpcResult(v, JAUTH[i], "getBlockCount", []interface{}{}, fmt.Sprintf("%d", i))
+				if b != nil {
+					_ = json.Unmarshal(b, &bc)
+					lbo := bos.LBO[i]
+					lbo.Height = int(bc.Result)
+					bos.LBO[i] = lbo
+					if bc.Result > bos.Max {
+						bos.Max = bc.Result
+					}
+				}
+			}
+			bos.Unlock()
+
+		}
+	}
+	//
+}
+
+func MempoolSize(wg *sync.WaitGroup, ctx context.Context) {
+	defer wg.Done()
+	t := time.NewTicker(time.Second * 1)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			bos.Lock()
+			for i, v := range RPCS {
+				var bc PendingCount
+				b := RpcResult(v, "", "txpool_status", []interface{}{}, fmt.Sprintf("%d", i))
+				if b != nil {
+					_ = json.Unmarshal(b, &bc)
+					pi, _ := strconv.ParseUint(bc.Result.Pending, 16, 64)
+					qi, _ := strconv.ParseUint(bc.Result.Queued, 16, 64)
+					lbo := bos.LBO[i]
+					lbo.CanSend = (pi + qi) < uint64(pageSize*len(RPCS))*3
+					bos.LBO[i] = lbo
+					logrus.Infof("-------------minertxpool:%d this node pending info %v , canSend :%v, max pending:%v", i, (pi + qi), bos.LBO[i].CanSend, uint64(pageSize*len(RPCS))*2)
+				}
+			}
+			bos.Unlock()
+
 		}
 	}
 	//

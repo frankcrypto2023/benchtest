@@ -107,7 +107,7 @@ func createPrivkeys() {
 }
 
 func (this *PV) WaitTx(ctx context.Context, txid string, client *ethclient.Client) {
-	t := time.NewTicker(time.Second)
+	t := time.NewTicker(time.Second / 2)
 	defer t.Stop()
 	for {
 		select {
@@ -124,12 +124,12 @@ func (this *PV) WaitTx(ctx context.Context, txid string, client *ethclient.Clien
 
 func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Client,
 	toAddress common.Address, value *big.Int, repeatTimes int64, wg *sync.WaitGroup, cs *CountStats) {
+
 	if wg != nil {
 		defer wg.Done()
 	}
 	this.Lock()
 	defer this.Unlock()
-
 	privateKey, err := crypto.HexToECDSA(this.K)
 	if err != nil {
 		log.Fatal(err)
@@ -167,6 +167,7 @@ func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Clie
 	if err != nil {
 		log.Fatal(err)
 	}
+	start := time.Now()
 	err = client.SendTransaction(ctx, signedTx)
 	if err != nil {
 		if cs != nil {
@@ -188,6 +189,7 @@ func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Clie
 	logrus.Debugf("miner:%d, index:%d, tx sent: %s", index, i, signedTx.Hash().Hex())
 	if os.Getenv("waitTx") == "1" {
 		this.WaitTx(ctx, signedTx.Hash().Hex(), client)
+		logrus.Debugf("miner:%d, index:%d, tx sent: %s spent:%s", index, i, signedTx.Hash().Hex(), time.Since(start))
 	}
 }
 
@@ -418,6 +420,7 @@ func MempoolSize(wg *sync.WaitGroup, ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// wait queued empty
 			return
 		case <-t.C:
 			for i, v := range RPCS {

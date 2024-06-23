@@ -107,7 +107,7 @@ func createPrivkeys() {
 }
 
 func (this *PV) WaitTx(ctx context.Context, txid string, client *ethclient.Client) {
-	t := time.NewTicker(time.Second / 2)
+	t := time.NewTicker(time.Second / 10)
 	defer t.Stop()
 	for {
 		select {
@@ -186,10 +186,12 @@ func (this *PV) SendTx(ctx context.Context, index, i int, client *ethclient.Clie
 	if cs != nil {
 		atomic.AddInt64(&cs.SuccCount, 1)
 	}
-	logrus.Debugf("miner:%d, index:%d, tx sent: %s", index, i, signedTx.Hash().Hex())
+	logrus.Infof("miner:%d, index:%d, tx sent: %s", index, i, signedTx.Hash().Hex())
+
 	if os.Getenv("waitTx") == "1" {
 		this.WaitTx(ctx, signedTx.Hash().Hex(), client)
-		logrus.Debugf("miner:%d, index:%d, tx sent: %s spent:%s", index, i, signedTx.Hash().Hex(), time.Since(start))
+		logrus.Infof("miner:%d, index:%d, tx sent: %s spent:%s", index, i, signedTx.Hash().Hex(), time.Since(start))
+
 	}
 }
 
@@ -264,14 +266,19 @@ func main() {
 	adminPV := PV{
 		K: os.Getenv("PRIVATE_KEY"),
 	}
+	if os.Getenv("check") == "1" {
+		CheckTxTime(client, ctx, &adminPV)
+		return
+	}
+	target := new(big.Int).Mul(big.NewInt(1e18), big.NewInt(10))
 	if os.Getenv("init") == "1" {
 		for i, v := range keys {
 			ba, _ := client.BalanceAt(context.Background(), common.HexToAddress(v.A), nil)
-			if ba.Cmp(big.NewInt(2e17)) <= 0 {
+			if ba.Cmp(target) <= 0 {
 				logrus.WithFields(logrus.Fields{
 					"index": i,
 				}).Info("init account balance")
-				adminPV.SendTx(ctx, 0, i, client, common.HexToAddress(v.A), big.NewInt(2e18), 0, nil, nil)
+				adminPV.SendTx(ctx, 0, i, client, common.HexToAddress(v.A), big.NewInt(1e5), 0, nil, nil)
 			}
 		}
 	}
